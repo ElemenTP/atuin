@@ -436,6 +436,37 @@ async fn handle_start(db: &Sqlite, h: &History) {
     }
 }
 
+/// In-process/library variant of [`start_history_entry`] with an explicit cwd.
+///
+/// The native library is loaded into the shell itself, so it cannot rely on
+/// the process-wide current directory (PowerShell providers, `cd` wrappers,
+/// ...): the shell passes its logical `$PWD` instead.
+pub(crate) async fn handle_start_with_cwd(
+    db: &Sqlite,
+    settings: &Settings,
+    command: &str,
+    cwd: &str,
+    author: Option<&str>,
+    author_kind: Option<AuthorKind>,
+    intent: Option<&str>,
+) -> Result<Option<HistoryId>> {
+    let Some(h) = make_starting_history(
+        settings,
+        command,
+        author,
+        author_kind,
+        intent,
+        Some(std::path::Path::new(cwd)),
+        None,
+    ) else {
+        return Ok(None);
+    };
+
+    handle_start(db, &h).await;
+
+    Ok(Some(h.id))
+}
+
 #[cfg(feature = "daemon")]
 #[instrument(level = "trace", skip_all, err)]
 async fn handle_daemon_start(settings: &Settings, h: History) -> Result<HistoryId> {
@@ -444,7 +475,7 @@ async fn handle_daemon_start(settings: &Settings, h: History) -> Result<HistoryI
 
 #[allow(unused_variables)]
 #[instrument(level = "trace", skip_all, fields(id = %id, exit, duration = ?duration), err)]
-async fn handle_end(
+pub(crate) async fn handle_end(
     db: &Sqlite,
     store: SqliteStore,
     history_store: HistoryStore,
@@ -530,7 +561,7 @@ async fn handle_daemon_end(
 }
 
 #[instrument(level = "trace", skip_all, err)]
-pub(super) async fn start_history_entry(
+pub(crate) async fn start_history_entry(
     settings: &Settings,
     command: &str,
     author: Option<&str>,
