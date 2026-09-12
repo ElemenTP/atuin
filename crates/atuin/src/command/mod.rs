@@ -7,7 +7,7 @@ use rustix::{fs::Mode, process::umask};
 use crate::i18n::fl;
 
 #[cfg(feature = "client")]
-mod client;
+pub(crate) mod client;
 
 mod contributors;
 

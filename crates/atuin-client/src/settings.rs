@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use atuin_common::logs::LogLevel;
@@ -17,6 +17,7 @@ use config::builder::DefaultState;
 use config::{Config, ConfigBuilder, Environment, File as ConfigFile, FileFormat};
 use eyre::{Context, Result, eyre};
 use fs_err::{File, create_dir_all};
+use parking_lot::RwLock;
 use regex::RegexSet;
 use secrecy::SecretString;
 use semver::Version;
@@ -24,11 +25,15 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use thiserror::Error;
 use time::OffsetDateTime;
-use tokio::sync::OnceCell;
-use tracing::instrument;
 use url::Url;
 
 static EXAMPLE_CONFIG: &str = include_str!("../config.toml");
+
+// Process-global meta store. Upstream keeps it in a function-local `OnceCell`;
+// the in-process integration needs to be able to close it (and its sqlx worker
+// thread) before the shared library is unloaded, and to forget it when a
+// session is destroyed, so it lives here behind a lock instead.
+static META_STORE: RwLock<Option<Arc<crate::meta::MetaStore>>> = RwLock::new(None);
 
 pub mod daemon;
 pub mod disk_usage_limit;
@@ -1236,15 +1241,62 @@ impl Settings {
     /// [`meta.db_path`](meta::Settings::db_path)). All future calls to this method will return the
     /// same [`MetaStore`](crate::meta::MetaStore), even if called on a different [`Settings`]
     /// instance. This matches existing behavior.
-    pub async fn meta_store(&self) -> Result<&'static crate::meta::MetaStore> {
-        static META_STORE: OnceCell<crate::meta::MetaStore> = OnceCell::const_new();
+    ///
+    /// The in-process integration gets an `Arc` and keeps the slot resettable so a session can be
+    /// destroyed (and the sqlx worker thread joined) before the shared library is unloaded.
+    pub async fn meta_store(&self) -> Result<Arc<crate::meta::MetaStore>> {
+        // Fast path: already initialised — a shared read lock is all we need.
+        {
+            let guard = META_STORE.read();
+            if let Some(store) = guard.as_ref() {
+                return Ok(Arc::clone(store));
+            }
+        }
 
-        META_STORE
-            .get_or_try_init(|| async {
-                crate::meta::MetaStore::new(&self.meta.db_path, &self.data_dir, self.local_timeout)
-                    .await
-            })
-            .await
+        let new_store = Arc::new(
+            crate::meta::MetaStore::new(&self.meta.db_path, &self.data_dir, self.local_timeout)
+                .await?,
+        );
+
+        // We may have lost the race while `MetaStore::new` was awaiting. Take
+        // the exclusive lock only for this final check-and-store.
+        //
+        // The lock is scoped to this block so the guard is dropped before the
+        // `close().await` below — never hold a lock while awaiting.
+        let raced = {
+            let mut guard = META_STORE.write();
+            match guard.as_ref() {
+                Some(store) => Some(Arc::clone(store)),
+                None => {
+                    *guard = Some(Arc::clone(&new_store));
+                    None
+                }
+            }
+        };
+
+        if let Some(winner) = raced {
+            // Another caller won the race. Do not leak the pool/worker thread
+            // of the store we just opened.
+            #[cfg(feature = "in-process")]
+            new_store.close().await;
+
+            return Ok(winner);
+        }
+
+        Ok(new_store)
+    }
+
+    /// Close and forget the process-global meta store.
+    ///
+    /// The next [`Settings::meta_store`] call opens a fresh pool. Shell
+    /// integrations call this from their unload path so sqlx's meta-store
+    /// worker thread exits before the shared library is unmapped.
+    #[cfg(feature = "in-process")]
+    pub async fn close_meta_store() {
+        let old = META_STORE.write().take();
+        if let Some(store) = old {
+            store.close().await;
+        }
     }
 
     pub async fn host_id(&self) -> Result<HostId> {

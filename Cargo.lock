@@ -301,6 +301,7 @@ dependencies = [
  "indicatif",
  "interim",
  "itertools 0.15.0",
+ "libc",
  "locked-tripwire",
  "nix 0.28.0",
  "norm",

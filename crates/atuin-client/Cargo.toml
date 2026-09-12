@@ -17,6 +17,7 @@ default = ["sync", "hub", "daemon"]
 sync = ["reqwest", "dep:reqwest-middleware"]
 hub = ["reqwest"]
 daemon = []
+in-process = []
 check-update = []
 octavo = []
 # Derive the protobuf enum traits on domain enums the daemon extern-paths into its codegen.

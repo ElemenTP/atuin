@@ -46,6 +46,13 @@ pub struct MetaStore {
 }
 
 impl MetaStore {
+    /// Close the underlying connection pool and wait for its sqlx worker
+    /// thread to exit. Used by shell integrations before `dlclose`.
+    #[cfg(feature = "in-process")]
+    pub async fn close(&self) {
+        self.sqlite.pool().close().await;
+    }
+
     /// Load the meta store at `path`.
     ///
     /// Legacy plain-text files in `data_dir` will be migrated to the meta store when the meta
