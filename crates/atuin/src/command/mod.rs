@@ -6,7 +6,7 @@ use eyre::Result;
 use crate::i18n::fl;
 
 #[cfg(feature = "client")]
-mod client;
+pub(crate) mod client;
 
 mod contributors;
 
