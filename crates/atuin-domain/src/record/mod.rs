@@ -193,7 +193,7 @@ impl Record<paseto_v4::EncryptedData> {
             .expect("could not serialize implicit assertions");
         let assertion = paseto_v4::ImplicitAssertion::from(ad.as_str());
         let data = paseto_v4::decrypt_sync(&self.data, Some(assertion), key)
-            .context("could not decrypt entry")?;
+            .wrap_err("could not decrypt entry")?;
         Ok(self.with_data_clone(data.into()))
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -14,20 +14,19 @@ use config::{Config, ConfigBuilder, Environment, File as ConfigFile, FileFormat}
 use eyre::{Context, Result, eyre};
 use fs_err::{File, create_dir_all};
 use humantime::parse_duration;
+use parking_lot::RwLock;
 use regex::RegexSet;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
-use tokio::sync::OnceCell;
-use tracing::instrument;
 use url::Url;
 
 static EXAMPLE_CONFIG: &str = include_str!("../config.toml");
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 static META_CONFIG: OnceLock<(String, f64)> = OnceLock::new();
-static META_STORE: OnceCell<crate::meta::MetaStore> = OnceCell::const_new();
+static META_STORE: OnceLock<RwLock<Option<Arc<crate::meta::MetaStore>>>> = OnceLock::new();
 
 pub mod daemon;
 pub mod disk_usage_limit;
@@ -1185,19 +1184,65 @@ impl Settings {
 
     // -- Meta store: lazily initialized on first access --
 
-    pub async fn meta_store() -> Result<&'static crate::meta::MetaStore> {
-        META_STORE
-            .get_or_try_init(|| async {
-                let (db_path, timeout) = META_CONFIG.get().ok_or_else(|| {
-                    eyre!("meta store config not set — Settings::new() has not been called")
-                })?;
-                crate::meta::MetaStore::new(
-                    db_path,
-                    std::time::Duration::try_from_secs_f64(*timeout)?,
-                )
-                .await
-            })
-            .await
+    pub async fn meta_store() -> Result<Arc<crate::meta::MetaStore>> {
+        let slot = META_STORE.get_or_init(|| RwLock::new(None));
+
+        // Fast path: already initialised — a shared read lock is all we need.
+        {
+            let guard = slot.read();
+            if let Some(store) = guard.as_ref() {
+                return Ok(Arc::clone(store));
+            }
+        }
+
+        let (db_path, timeout) = META_CONFIG.get().ok_or_else(|| {
+            eyre!("meta store config not set — Settings::new() has not been called")
+        })?;
+        let new_store = Arc::new(
+            crate::meta::MetaStore::new(db_path, std::time::Duration::try_from_secs_f64(*timeout)?)
+                .await?,
+        );
+
+        // We may have lost the race while `MetaStore::new` was awaiting. Take
+        // the exclusive lock only for this final check-and-store.
+        //
+        // The lock is scoped to this block so the guard is dropped before the
+        // `close().await` below — never hold a lock while awaiting.
+        let raced = {
+            let mut guard = slot.write();
+            match guard.as_ref() {
+                Some(store) => Some(Arc::clone(store)),
+                None => {
+                    *guard = Some(Arc::clone(&new_store));
+                    None
+                }
+            }
+        };
+
+        if let Some(winner) = raced {
+            // Another caller won the race. Do not leak the pool/worker thread
+            // of the store we just opened.
+            #[cfg(feature = "in-process")]
+            new_store.close().await;
+
+            return Ok(winner);
+        }
+
+        Ok(new_store)
+    }
+
+    /// Close and forget the process-global meta store.
+    ///
+    /// The next [`Settings::meta_store`] call opens a fresh pool. Shell
+    /// integrations call this from their unload path so sqlx's meta-store
+    /// worker thread exits before the shared library is unmapped.
+    #[cfg(feature = "in-process")]
+    pub async fn close_meta_store() {
+        let slot = META_STORE.get_or_init(|| RwLock::new(None));
+        let old = slot.write().take();
+        if let Some(store) = old {
+            store.close().await;
+        }
     }
 
     pub async fn host_id() -> Result<HostId> {

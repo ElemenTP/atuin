@@ -50,6 +50,7 @@ default = [
     "pty-proxy",
 ]
 client = ["atuin-client"]
+in-process = ["client", "atuin-client/in-process"]
 sync = ["atuin-client/sync"]
 daemon = ["atuin-client/daemon", "atuin-daemon", "atuin-ai?/daemon"]
 ai = ["atuin-ai"]
@@ -108,6 +109,7 @@ futures-util = { workspace = true }
 indicatif = { workspace = true }
 interim = { workspace = true }
 itertools = { workspace = true }
+libc = "0.2"
 norm = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }

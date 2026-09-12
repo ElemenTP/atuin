@@ -5,7 +5,7 @@ use eyre::Result;
 use rustix::{fs::Mode, process::umask};
 
 #[cfg(feature = "client")]
-mod client;
+pub(crate) mod client;
 
 mod contributors;
 

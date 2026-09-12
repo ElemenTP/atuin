@@ -32,6 +32,13 @@ pub struct MetaStore {
 }
 
 impl MetaStore {
+    /// Close the underlying connection pool and wait for its sqlx worker
+    /// thread to exit. Used by shell integrations before `dlclose`.
+    #[cfg(feature = "in-process")]
+    pub async fn close(&self) {
+        self.sqlite.pool().close().await;
+    }
+
     pub async fn new(path: impl AsRef<OsStr>, timeout: Duration) -> Result<Self> {
         let path = path.as_ref();
         debug!("opening meta sqlite database at {path:?}");

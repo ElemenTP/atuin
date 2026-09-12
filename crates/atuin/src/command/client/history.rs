@@ -392,6 +392,7 @@ fn normalize_command_for_storage<'a>(command: &'a str, settings: &Settings) -> &
     }
 }
 
+#[cfg(feature = "daemon")]
 fn make_starting_history(
     settings: &Settings,
     command: &str,
@@ -399,9 +400,32 @@ fn make_starting_history(
     author_kind: Option<AuthorKind>,
     intent: Option<&str>,
 ) -> Option<History> {
+    make_starting_history_with_cwd(
+        settings,
+        command,
+        author,
+        author_kind,
+        intent,
+        &utils::get_current_dir(),
+    )
+}
+
+/// Like [`make_starting_history`], but accepts an explicit cwd.
+///
+/// The in-process shell integration passes the shell's logical `$PWD` because
+/// the native library is loaded into the shell itself and `get_current_dir()`
+/// may not match the shell's directory (PowerShell providers, `cd` wrappers,
+/// etc).
+fn make_starting_history_with_cwd(
+    settings: &Settings,
+    command: &str,
+    author: Option<&str>,
+    author_kind: Option<AuthorKind>,
+    intent: Option<&str>,
+    cwd: &str,
+) -> Option<History> {
     // It's better for atuin to silently fail here and attempt to
     // store whatever is ran, than to throw an error to the terminal
-    let cwd = utils::get_current_dir();
     let command = normalize_command_for_storage(command, settings);
 
     // A command containing a NUL byte could never have been executed by a shell
@@ -443,7 +467,36 @@ async fn handle_start(
     author_kind: Option<AuthorKind>,
     intent: Option<&str>,
 ) -> Result<Option<HistoryId>> {
-    let Some(h) = make_starting_history(settings, command, author, author_kind, intent) else {
+    handle_start_with_cwd(
+        db,
+        settings,
+        command,
+        &utils::get_current_dir(),
+        author,
+        author_kind,
+        intent,
+    )
+    .await
+}
+
+/// In-process/library variant of [`handle_start`] with an explicit cwd.
+pub(crate) async fn handle_start_with_cwd(
+    db: &Sqlite,
+    settings: &Settings,
+    command: &str,
+    cwd: &str,
+    author: Option<&str>,
+    author_kind: Option<AuthorKind>,
+    intent: Option<&str>,
+) -> Result<Option<HistoryId>> {
+    let Some(h) = make_starting_history_with_cwd(
+        settings,
+        command,
+        author,
+        author_kind,
+        intent,
+        cwd,
+    ) else {
         return Ok(None);
     };
 
@@ -486,7 +539,7 @@ async fn handle_daemon_start(
 
 #[allow(unused_variables)]
 #[instrument(level = "trace", skip_all, fields(id = %id, exit, duration = ?duration), err)]
-async fn handle_end(
+pub(crate) async fn handle_end(
     db: &Sqlite,
     store: SqliteStore,
     history_store: HistoryStore,
@@ -572,7 +625,7 @@ async fn handle_daemon_end(
 }
 
 #[instrument(level = "trace", skip_all, err)]
-pub(super) async fn start_history_entry(
+pub(crate) async fn start_history_entry(
     settings: &Settings,
     command: &str,
     author: Option<&str>,
@@ -590,7 +643,7 @@ pub(super) async fn start_history_entry(
 }
 
 #[instrument(level = "trace", skip_all, fields(id = %id, exit, duration = ?duration), err)]
-pub(super) async fn end_history_entry(
+pub(crate) async fn end_history_entry(
     settings: &Settings,
     id: HistoryId,
     exit: i64,

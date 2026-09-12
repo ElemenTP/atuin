@@ -340,9 +340,10 @@ impl Sqlite {
         Ok(Self { sqlite })
     }
 
-    /// Close the underlying connection pool. Test-only: used to force query errors.
-    #[cfg(test)]
-    pub(crate) async fn close(&self) {
+    /// Close the underlying connection pool and wait for its worker threads to
+    /// exit. Shell integrations call this before unloading the shared library.
+    #[cfg(any(feature = "in-process", test))]
+    pub async fn close(&self) {
         self.sqlite.pool().close().await;
     }
 
