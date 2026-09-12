@@ -36,6 +36,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use windows_sys::Win32::System::Console::{GetConsoleOutputCP, SetConsoleOutputCP};
 
 use super::cursor::Cursor;
+#[cfg(feature = "in-process")]
+use super::in_process_event;
 use super::engines::{AnySearchEngine, SearchEngine, SearchState};
 use super::history_list::{HistoryList, ListState};
 use super::inspector::Stats as InspectorStats;
@@ -2014,13 +2016,13 @@ pub async fn history(
         let initial_search_mode = app.search_mode();
         let initial_custom_context = app.search.custom_context;
 
-        let event_ready = tokio::task::spawn_blocking(|| event::poll(Duration::from_millis(250)));
+        let event_ready = tokio::task::spawn_blocking(|| input_event_poll(Duration::from_millis(250)));
 
         tokio::select! {
             event_ready = event_ready => {
                 if event_ready?? {
                     loop {
-                        match app.handle_input(settings, &event::read()?) {
+                        match app.handle_input(settings, &input_event_read()?) {
                             InputAction::Continue => {},
                             InputAction::DeleteInspecting => {
                                 if let Some(id) = app.inspecting_state.current {
@@ -2125,7 +2127,7 @@ pub async fn history(
                                 break 'render r;
                             },
                         }
-                        if !event::poll(Duration::ZERO)? {
+                        if !input_event_poll(Duration::ZERO)? {
                             break;
                         }
                     }
@@ -2306,6 +2308,29 @@ fn set_clipboard(s: String) -> Result<(), arboard::Error> {
 fn set_clipboard(_s: String) -> Result<(), std::convert::Infallible> {
     Ok(())
 }
+
+fn input_event_poll(timeout: Duration) -> std::io::Result<bool> {
+    #[cfg(feature = "in-process")]
+    {
+        in_process_event::poll(timeout)
+    }
+    #[cfg(not(feature = "in-process"))]
+    {
+        event::poll(timeout)
+    }
+}
+
+fn input_event_read() -> std::io::Result<Event> {
+    #[cfg(feature = "in-process")]
+    {
+        in_process_event::read()
+    }
+    #[cfg(not(feature = "in-process"))]
+    {
+        event::read()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

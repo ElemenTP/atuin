@@ -17,6 +17,7 @@ default = ["sync", "hub", "daemon"]
 sync = ["reqwest", "dep:reqwest-middleware"]
 hub = ["reqwest"]
 daemon = []
+in-process = []
 check-update = []
 # Statically link (vendor) OpenSSL for native-tls instead of using the system
 # libssl. Used for portable release artifacts; a no-op on macOS/Windows.
@@ -58,6 +59,7 @@ sqlx = { workspace = true, features = ["sqlite", "regexp"] }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["macros", "formatting", "parsing"] }
 tokio = { workspace = true }
+parking_lot = { workspace = true }
 tracing = { workspace = true }
 tracing-futures = { workspace = true }
 typed-builder = { workspace = true }

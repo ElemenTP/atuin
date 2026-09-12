@@ -64,6 +64,13 @@ impl<'r> ::sqlx::FromRow<'r, SqliteRow> for DbRecord {
 }
 
 impl SqliteStore {
+    /// Close the underlying connection pool and wait for its worker threads to
+    /// exit. Shell integrations call this before unloading the shared library.
+    #[cfg(feature = "in-process")]
+    pub async fn close(&self) {
+        self.sqlite.pool().close().await;
+    }
+
     #[instrument(level = "trace", skip_all, fields(timeout = ?timeout), err)]
     pub async fn new(path: impl AsRef<OsStr>, timeout: Duration) -> Result<Self> {
         let path = path.as_ref();

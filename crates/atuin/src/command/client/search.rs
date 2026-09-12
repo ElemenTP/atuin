@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{IsTerminal as _, Write, stderr, stdout};
 
-use atuin_client::database::{OptFilters, Sqlite, current_context};
+use atuin_client::database::{Context, OptFilters, Sqlite, current_context};
 use atuin_client::history::store::HistoryStore;
 use atuin_client::history::{AuthorPattern, History};
 use atuin_client::record::sqlite_store::SqliteStore;
@@ -18,10 +18,12 @@ use tracing::instrument;
 use super::history::ListMode;
 
 mod cursor;
+#[cfg(feature = "in-process")]
+mod in_process_event;
 mod engines;
 mod history_list;
 mod inspector;
-mod interactive;
+pub(crate) mod interactive;
 pub mod keybindings;
 mod syntax;
 
@@ -319,11 +321,27 @@ impl Cmd {
 
 // This is supposed to more-or-less mirror the command line version, so ofc
 // it is going to have a lot of args
-async fn run_non_interactive(
+pub(crate) async fn run_non_interactive(
     settings: &Settings,
     filter_options: OptFilters<'_>,
     query: &[String],
     db: &Sqlite,
+) -> Result<Vec<History>> {
+    let context = current_context().await?;
+    run_non_interactive_with_context(settings, filter_options, query, db, context).await
+}
+
+/// In-process/library variant of `run_non_interactive`.
+///
+/// The shell integration cannot always rely on `$ATUIN_SESSION` being set
+/// (unit tests, early startup), so this lets the in-process session provide an
+/// explicit [`Context`] while sharing all of the upstream search behaviour.
+pub(crate) async fn run_non_interactive_with_context(
+    settings: &Settings,
+    filter_options: OptFilters<'_>,
+    query: &[String],
+    db: &Sqlite,
+    context: Context,
 ) -> Result<Vec<History>> {
     let current_dir;
     let dir = if filter_options.cwd == Some(".") {
@@ -332,8 +350,6 @@ async fn run_non_interactive(
     } else {
         filter_options.cwd
     };
-
-    let context = current_context().await?;
 
     let opt_filter = OptFilters {
         cwd: dir,
@@ -356,10 +372,10 @@ async fn run_non_interactive(
 }
 
 #[instrument(level = "trace", skip_all, err)]
-pub async fn prepare_index(settings: &Settings) -> Result<()> {
+pub async fn prepare_index(_settings: &Settings) -> Result<()> {
     use engines::AnySearchEngine;
     #[cfg(feature = "daemon")]
-    if let AnySearchEngine::Daemon(mut search) = engines::engine(settings.search_mode(), settings) {
+    if let AnySearchEngine::Daemon(mut search) = engines::engine(_settings.search_mode(), _settings) {
         search.prepare_index().await?;
     }
     Ok(())

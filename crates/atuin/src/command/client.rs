@@ -22,7 +22,7 @@ mod config;
 mod default_config;
 mod doctor;
 mod dotfiles;
-mod history;
+pub(crate) mod history;
 mod hook;
 mod import;
 mod info;
@@ -32,7 +32,7 @@ mod kv;
 #[cfg(feature = "daemon")]
 mod output;
 mod scripts;
-mod search;
+pub(crate) mod search;
 mod setup;
 mod stats;
 mod store;
