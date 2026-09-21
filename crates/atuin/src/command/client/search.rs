@@ -27,6 +27,14 @@ pub(crate) mod interactive;
 pub mod keybindings;
 mod syntax;
 
+/// Release the process-global terminal input handle cached by the in-process
+/// TUI. Called when a session is destroyed so no fd or buffered bytes survive
+/// into the next session or library unload.
+#[cfg(feature = "in-process")]
+pub(crate) fn reset_tui_input() {
+    in_process_event::reset();
+}
+
 use atuin_common::time::UtcOffsetSpec;
 
 #[allow(clippy::struct_excessive_bools, clippy::struct_field_names)]
