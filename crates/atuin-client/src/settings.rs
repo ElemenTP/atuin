@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -24,9 +24,30 @@ use url::Url;
 
 static EXAMPLE_CONFIG: &str = include_str!("../config.toml");
 
-static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
-static META_CONFIG: OnceLock<(String, f64)> = OnceLock::new();
-static META_STORE: OnceLock<RwLock<Option<Arc<crate::meta::MetaStore>>>> = OnceLock::new();
+// The two path caches below are first-write-wins for the process (matching the
+// CLI, which builds settings once). The in-process integration clears them on
+// session teardown via `shutdown_process_state`, so destroying and re-creating
+// a session re-resolves the data directory and meta store instead of reusing
+// the previous session's values.
+static DATA_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
+static META_CONFIG: RwLock<Option<(String, f64)>> = RwLock::new(None);
+static META_STORE: RwLock<Option<Arc<crate::meta::MetaStore>>> = RwLock::new(None);
+
+/// Record the resolved data directory unless one was already recorded.
+fn set_data_dir_once(dir: PathBuf) {
+    let mut slot = DATA_DIR.write();
+    if slot.is_none() {
+        *slot = Some(dir);
+    }
+}
+
+/// Record the meta store configuration unless one was already recorded.
+fn set_meta_config_once(config: (String, f64)) {
+    let mut slot = META_CONFIG.write();
+    if slot.is_none() {
+        *slot = Some(config);
+    }
+}
 
 pub mod daemon;
 pub mod disk_usage_limit;
@@ -1166,10 +1187,10 @@ impl Settings {
     }
 
     /// The resolved data directory: a custom `data_dir` / `ATUIN_DATA_DIR` if one was configured
-    /// when settings were last built this process, otherwise [`atuin_common::utils::data_dir`].
+    /// when settings were last built, otherwise [`atuin_common::utils::data_dir`].
     #[must_use]
     pub fn effective_data_dir() -> PathBuf {
-        DATA_DIR.get().cloned().unwrap_or_else(atuin_common::utils::data_dir)
+        DATA_DIR.read().as_ref().cloned().unwrap_or_else(atuin_common::utils::data_dir)
     }
 
     /// Directory of the durable command-output capture store, under the [effective data
@@ -1185,21 +1206,23 @@ impl Settings {
     // -- Meta store: lazily initialized on first access --
 
     pub async fn meta_store() -> Result<Arc<crate::meta::MetaStore>> {
-        let slot = META_STORE.get_or_init(|| RwLock::new(None));
-
         // Fast path: already initialised — a shared read lock is all we need.
         {
-            let guard = slot.read();
+            let guard = META_STORE.read();
             if let Some(store) = guard.as_ref() {
                 return Ok(Arc::clone(store));
             }
         }
 
-        let (db_path, timeout) = META_CONFIG.get().ok_or_else(|| {
-            eyre!("meta store config not set — Settings::new() has not been called")
-        })?;
+        let (db_path, timeout) = META_CONFIG
+            .read()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                eyre!("meta store config not set — Settings::new() has not been called")
+            })?;
         let new_store = Arc::new(
-            crate::meta::MetaStore::new(db_path, std::time::Duration::try_from_secs_f64(*timeout)?)
+            crate::meta::MetaStore::new(&db_path, std::time::Duration::try_from_secs_f64(timeout)?)
                 .await?,
         );
 
@@ -1209,7 +1232,7 @@ impl Settings {
         // The lock is scoped to this block so the guard is dropped before the
         // `close().await` below — never hold a lock while awaiting.
         let raced = {
-            let mut guard = slot.write();
+            let mut guard = META_STORE.write();
             match guard.as_ref() {
                 Some(store) => Some(Arc::clone(store)),
                 None => {
@@ -1238,11 +1261,25 @@ impl Settings {
     /// worker thread exits before the shared library is unmapped.
     #[cfg(feature = "in-process")]
     pub async fn close_meta_store() {
-        let slot = META_STORE.get_or_init(|| RwLock::new(None));
-        let old = slot.write().take();
+        let old = META_STORE.write().take();
         if let Some(store) = old {
             store.close().await;
         }
+    }
+
+    /// Close the process-global meta store and clear the cached settings paths.
+    ///
+    /// Shell integrations call this from their destroy path. [`DATA_DIR`] and
+    /// [`META_CONFIG`] are otherwise first-write-wins for the whole process,
+    /// which is correct for the CLI (settings are built once) but not for a
+    /// long-lived library: clearing them makes the next `Settings::new()`
+    /// re-resolve the data directory and meta store location instead of
+    /// pointing at the previous session's (possibly deleted) directory.
+    #[cfg(feature = "in-process")]
+    pub async fn shutdown_process_state() {
+        Self::close_meta_store().await;
+        *DATA_DIR.write() = None;
+        *META_CONFIG.write() = None;
     }
 
     pub async fn host_id() -> Result<HostId> {
@@ -1703,7 +1740,7 @@ impl Settings {
             atuin_common::utils::data_dir()
         };
 
-        DATA_DIR.set(effective_data_dir.clone()).ok();
+        set_data_dir_once(effective_data_dir.clone());
 
         create_dir_all(&effective_data_dir)
             .wrap_err_with(|| format!("could not create dir {effective_data_dir:?}"))?;
@@ -1849,7 +1886,7 @@ impl Settings {
         settings.ui.validate()?;
 
         // Register meta store config for lazy initialization on first access
-        META_CONFIG.set((settings.meta.db_path.clone(), settings.local_timeout)).ok();
+        set_meta_config_once((settings.meta.db_path.clone(), settings.local_timeout));
 
         Ok(settings)
     }
@@ -1929,7 +1966,7 @@ pub enum ValidationError {
 /// or other meta store initialization. Only call from tests.
 #[doc(hidden)]
 pub fn init_meta_config_for_testing(meta_db_path: impl Into<String>, local_timeout: f64) {
-    META_CONFIG.set((meta_db_path.into(), local_timeout)).ok();
+    set_meta_config_once((meta_db_path.into(), local_timeout));
 }
 
 #[cfg(test)]
