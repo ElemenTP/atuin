@@ -1318,6 +1318,15 @@ impl Settings {
         }
     }
 
+    /// Close the process-global meta store.
+    ///
+    /// Shell integrations call this from their destroy path so the sqlx worker
+    /// thread is joined before a `dlclose` can unmap the shared library.
+    #[cfg(feature = "in-process")]
+    pub async fn shutdown_process_state() {
+        Self::close_meta_store().await;
+    }
+
     pub async fn host_id(&self) -> Result<HostId> {
         self.meta_store().await?.host_id().await
     }
@@ -2083,6 +2092,7 @@ pub enum ValidationError {
     #[error(transparent)]
     Ui(#[from] UiValidationError),
 }
+
 
 #[cfg(test)]
 pub(crate) fn test_local_timeout() -> Duration {
