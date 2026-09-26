@@ -104,8 +104,12 @@ pub struct SearchOptions {
     pub filter_mode: Option<FilterMode>,
     pub cwd: Option<String>,
     pub exclude_cwd: Option<String>,
-    pub exit: Option<i64>,
-    pub exclude_exit: Option<i64>,
+    /// Include any of these exit codes (upstream repeatable `--exit`).
+    /// An empty slice means no restriction.
+    pub exit: Vec<i64>,
+    /// Exclude all of these exit codes (upstream repeatable `--exclude-exit`).
+    /// An empty slice means no restriction.
+    pub exclude_exit: Vec<i64>,
     pub before: Option<String>,
     pub after: Option<String>,
     pub limit: Option<i64>,
@@ -303,7 +307,7 @@ impl Session {
         };
 
         let (history_db, history_store, session_id) = runtime.block_on(async {
-            let timeout = Duration::try_from_secs_f64(settings.local_timeout)?;
+            let timeout = Duration::try_from_secs_f64(settings.local_timeout.as_secs_f64())?;
 
             let history_db = Sqlite::new(&db_path, timeout).await?;
             let record_store = SqliteStore::new(record_store_path, timeout).await?;
@@ -514,8 +518,8 @@ impl Session {
 
             let context = query_context().await?;
             let opt_filter = OptFilters {
-                exit,
-                exclude_exit,
+                exit: &exit,
+                exclude_exit: &exclude_exit,
                 only_failed: false,
                 cwd: cwd.as_deref(),
                 exclude_cwd: exclude_cwd.as_deref(),
