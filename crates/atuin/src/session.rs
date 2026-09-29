@@ -551,6 +551,12 @@ impl Session {
     fn search_interactive_tui(&self, settings: &Settings, query: String) -> Result<SearchResult> {
         self.stats.interactive_search_calls.fetch_add(1, Ordering::Relaxed);
 
+        // Drop any bytes left over from a previous TUI run (the tail of a
+        // cancelled or split escape sequence, a paste remainder, ...). They
+        // live in a process-global buffer and would otherwise be replayed as
+        // keystrokes into this search.
+        crate::command::client::search::reset_tui_input();
+
         let db = self.history_db.clone();
         let history_store = self.history_store.clone();
         let result = self.rt().block_on(async move {
