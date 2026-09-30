@@ -35,11 +35,21 @@ mod unix {
         Event, KeyCode, KeyEvent, KeyModifiers, MediaKeyCode, MouseButton, MouseEvent,
         MouseEventKind,
     };
+    #[cfg(target_os = "macos")]
+    use std::ffi::CStr;
     use std::fs::{File, OpenOptions};
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, RawFd};
+    use std::os::raw::c_int;
+    #[cfg(target_os = "macos")]
+    use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
+
+    use mio::unix::SourceFd;
+    use mio::{Events, Interest, Poll, Token};
+
+    /// Token identifying the terminal descriptor in the mio poller.
+    const TTY_TOKEN: Token = Token(0);
 
     /// A fully parsed terminal event.
     #[derive(Debug)]
@@ -49,9 +59,72 @@ mod unix {
         Paste(String),
     }
 
+    /// Where terminal input comes from.
+    enum Source {
+        /// A descriptor we opened ourselves: we own it, so it is closed and its
+        /// flags do not matter once the input is dropped.
+        Owned(File),
+        /// One of the shell's standard descriptors. We must not close it, and
+        /// any `O_NONBLOCK` we set has to be restored when the input is dropped.
+        Borrowed { fd: RawFd, saved_flags: c_int },
+    }
+
+    impl Source {
+        fn fd(&self) -> RawFd {
+            match self {
+                Source::Owned(file) => file.as_raw_fd(),
+                Source::Borrowed { fd, .. } => *fd,
+            }
+        }
+
+        fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+            let read = unsafe {
+                libc::read(
+                    self.fd(),
+                    buf.as_mut_ptr().cast::<libc::c_void>(),
+                    buf.len(),
+                )
+            };
+            if read < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(read as usize)
+            }
+        }
+
+        /// Switch the descriptor to non-blocking.
+        ///
+        /// mio is edge-triggered, so every reported readiness must be drained
+        /// until `WouldBlock`; that requires a non-blocking descriptor.
+        fn set_nonblocking(&self) -> io::Result<()> {
+            let flags = unsafe { libc::fcntl(self.fd(), libc::F_GETFL) };
+            if flags < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if unsafe { libc::fcntl(self.fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+    }
+
     struct Input {
-        file: File,
+        source: Source,
         buf: Vec<u8>,
+        /// Readiness for the terminal descriptor. mio wraps `epoll` on Linux
+        /// and `kqueue` on macOS, which is what crossterm's own mio-based event
+        /// source uses and the only mechanism that behaves on macOS ttys.
+        poll: Poll,
+        events: Events,
+    }
+
+    impl Drop for Input {
+        fn drop(&mut self) {
+            // Never leave one of the shell's descriptors non-blocking.
+            if let Source::Borrowed { fd, saved_flags } = self.source {
+                unsafe { libc::fcntl(fd, libc::F_SETFL, saved_flags) };
+            }
+        }
     }
 
     enum Parse {
@@ -138,19 +211,112 @@ mod unix {
         }
     }
 
+    /// Resolve the concrete device path of a terminal descriptor.
+    ///
+    /// On macOS `/dev/tty` is a "clone" device (major 2, minor 0) that
+    /// `poll`/`select`/`kqueue` reject -- kqueue returns `EINVAL` -- while the
+    /// real device the descriptor refers to (`/dev/ttysNNN`, major 16) can be
+    /// watched. `ttyname` gives us that path.
+    ///
+    /// See <https://github.com/crossterm-rs/crossterm/issues/996>.
+    #[cfg(target_os = "macos")]
+    fn tty_path(fd: RawFd) -> Option<PathBuf> {
+        let name = unsafe { libc::ttyname(fd) };
+        if name.is_null() {
+            return None;
+        }
+        // `ttyname` returns a pointer into a static buffer, so copy it now.
+        Some(PathBuf::from(
+            unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned(),
+        ))
+    }
+
     impl Input {
         fn open() -> io::Result<Self> {
-            let file = OpenOptions::new().read(true).open("/dev/tty")?;
-            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-            if flags < 0 {
+            #[cfg(target_os = "macos")]
+            {
+                return Self::open_macos();
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Self::from_owned(OpenOptions::new().read(true).open("/dev/tty")?)
+            }
+        }
+
+        /// macOS: watch the *concrete* controlling-terminal device.
+        ///
+        /// Never falls back to `/dev/tty`: kqueue cannot watch that clone
+        /// device (`EINVAL`), so registering it would fail later with a
+        /// confusing error instead of an explainable one.
+        ///
+        /// First try to open the device node behind a standard descriptor: that
+        /// gives us a descriptor we own, so making it non-blocking is
+        /// unobservable to the shell. If no node can be opened, borrow *stdin*
+        /// -- the only standard descriptor guaranteed to be readable (stdout is
+        /// often write-only, and making it non-blocking would break rendering).
+        #[cfg(target_os = "macos")]
+        fn open_macos() -> io::Result<Self> {
+            let mut stdin_is_tty = false;
+            for fd in [
+                libc::STDIN_FILENO,
+                libc::STDOUT_FILENO,
+                libc::STDERR_FILENO,
+            ] {
+                if unsafe { libc::isatty(fd) } != 1 {
+                    continue;
+                }
+                if fd == libc::STDIN_FILENO {
+                    stdin_is_tty = true;
+                }
+                if let Some(file) = tty_path(fd)
+                    .and_then(|path| OpenOptions::new().read(true).open(path).ok())
+                {
+                    return Self::from_owned(file);
+                }
+            }
+
+            if stdin_is_tty {
+                return Self::from_borrowed(libc::STDIN_FILENO);
+            }
+
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the in-process search TUI needs a terminal on stdin, stdout or \
+                 stderr (macOS cannot watch the /dev/tty clone device)",
+            ))
+        }
+
+        /// Own a terminal descriptor we opened ourselves.
+        fn from_owned(file: File) -> io::Result<Self> {
+            Self::with_source(Source::Owned(file))
+        }
+
+        /// Borrow one of the shell's standard descriptors.
+        #[cfg(target_os = "macos")]
+        fn from_borrowed(fd: RawFd) -> io::Result<Self> {
+            let saved_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if saved_flags < 0 {
                 return Err(io::Error::last_os_error());
             }
-            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
+            Self::with_source(Source::Borrowed { fd, saved_flags })
+        }
+
+        /// Register `source` for read readiness and make it non-blocking.
+        ///
+        /// The fallible work happens first: if registration fails we must not
+        /// have touched a borrowed descriptor's flags.
+        fn with_source(source: Source) -> io::Result<Self> {
+            let poll = Poll::new()?;
+            let fd = source.fd();
+            poll.registry()
+                .register(&mut SourceFd(&fd), TTY_TOKEN, Interest::READABLE)?;
+            source.set_nonblocking()?;
+
             Ok(Self {
-                file,
+                source,
                 buf: Vec::with_capacity(256),
+                poll,
+                events: Events::with_capacity(1),
             })
         }
 
@@ -158,7 +324,14 @@ mod unix {
             if !self.buf.is_empty() {
                 return Ok(true);
             }
-            self.wait_fd(timeout)
+            if !self.wait_fd(timeout)? {
+                return Ok(false);
+            }
+            // Readable: pull the bytes now so `poll` can never report readiness
+            // that `read_event` is unable to satisfy. A readiness signal with no
+            // bytes would make the upstream event loop spin.
+            self.drain()?;
+            Ok(!self.buf.is_empty())
         }
 
         fn read_event(&mut self) -> io::Result<Event> {
@@ -245,21 +418,23 @@ mod unix {
             }
         }
 
+        /// Wait until the terminal descriptor has input (or `timeout` expires).
+        ///
+        /// Readiness goes through mio, which uses `epoll` on Linux and
+        /// `kqueue` on macOS. This matters on macOS: the `/dev/tty` clone
+        /// device cannot be watched at all (kqueue returns `EINVAL`), and a
+        /// readiness API that instead reports "readable" forever makes the
+        /// upstream event loop spin at 100% CPU without ever seeing a key.
+        /// `Input::open` therefore uses the concrete terminal device, and mio
+        /// (the crate crossterm's own mio-based event source uses) provides the
+        /// readiness. mio is edge-triggered, so every reported readiness is
+        /// drained by `drain`/`poll`.
         fn wait_fd(&mut self, timeout: Duration) -> io::Result<bool> {
-            let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-            let mut pfd = libc::pollfd {
-                fd: self.file.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
             loop {
-                let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-                if rc >= 0 {
-                    return Ok(rc > 0 && (pfd.revents & libc::POLLIN) != 0);
-                }
-                let err = io::Error::last_os_error();
-                if err.kind() != io::ErrorKind::Interrupted {
-                    return Err(err);
+                match self.poll.poll(&mut self.events, Some(timeout)) {
+                    Ok(()) => return Ok(!self.events.is_empty()),
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -268,7 +443,7 @@ mod unix {
             let mut chunk = [0u8; 256];
             let mut total = 0;
             loop {
-                match self.file.read(&mut chunk) {
+                match self.source.read(&mut chunk) {
                     Ok(0) => return Ok(total),
                     Ok(n) => {
                         self.buf.extend_from_slice(&chunk[..n]);
@@ -1420,6 +1595,50 @@ mod unix {
                 Parsed::Key(key) => key,
                 _ => panic!("expected a key event"),
             }
+        }
+
+        /// Regression guard for the macOS hang: `poll` must never report
+        /// readiness that `read_event` cannot satisfy, otherwise the upstream
+        /// event loop spins at 100% CPU and never processes a key.
+        ///
+        /// (macOS cannot watch `/dev/tty` at all -- kqueue returns `EINVAL` --
+        /// which is why `Input::open` uses the concrete terminal device and
+        /// readiness goes through mio/kqueue.)
+        #[test]
+        fn poll_only_reports_ready_when_bytes_are_buffered() {
+            use std::io::Write;
+            use std::os::fd::OwnedFd;
+            use std::os::unix::net::UnixStream;
+
+            let (mut tx, rx) = UnixStream::pair().unwrap();
+            let mut input = Input::from_owned(File::from(OwnedFd::from(rx))).unwrap();
+
+            assert!(
+                !input.poll(Duration::ZERO).unwrap(),
+                "an idle descriptor must not be reported as ready"
+            );
+
+            tx.write_all(b"a").unwrap();
+            assert!(
+                input.poll(Duration::from_secs(5)).unwrap(),
+                "bytes on the descriptor must be reported as ready"
+            );
+            assert!(
+                !input.buf.is_empty(),
+                "poll must buffer the bytes it reports, so read_event can serve them"
+            );
+
+            match input.read_event().unwrap() {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('a'),
+                    ..
+                }) => {}
+                other => panic!("unexpected event {other:?}"),
+            }
+            assert!(
+                !input.poll(Duration::ZERO).unwrap(),
+                "a drained descriptor must not stay ready"
+            );
         }
     }
 }
