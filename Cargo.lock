@@ -290,6 +290,7 @@ dependencies = [
  "itertools 0.15.0",
  "libc",
  "locked-tripwire",
+ "mio",
  "nix 0.28.0",
  "norm",
  "opentelemetry",

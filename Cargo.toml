@@ -98,6 +98,10 @@ listenfd = "1"
 locked-tripwire = "0.1"
 memchr = "2"
 metrics = "0.24"
+# Readiness for the in-process TUI's terminal descriptor. mio is already in the
+# dependency graph through crossterm; it uses epoll on Linux and kqueue on
+# macOS, which is what crossterm's own mio-based event source uses.
+mio = { version = "1", features = ["os-ext", "os-poll"] }
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 minijinja = "2"
 minspan = "0.1"
