@@ -564,7 +564,15 @@ impl Session {
             let theme =
                 theme_manager.load_theme(settings.theme.name.as_str(), settings.theme.max_depth);
             interactive::history(&[query], settings, db, &history_store, theme).await
-        })?;
+        });
+
+        // Release the terminal handle as soon as the TUI is done rather than
+        // waiting for the next search or session teardown: it may be a borrowed
+        // standard descriptor whose original flags have to be restored before
+        // the shell resumes reading.
+        crate::command::client::search::reset_tui_input();
+
+        let result = result?;
 
         if result.is_empty() {
             self.stats.interactive_cancels.fetch_add(1, Ordering::Relaxed);
