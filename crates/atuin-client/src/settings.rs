@@ -1101,7 +1101,7 @@ impl Default for Ui {
 
 #[allow(deprecated)]
 #[serde_as]
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Settings {
     #[serde_as(as = "RelativeTo<ConfigDir>")]
     pub data_dir: AbsPathBuf,
@@ -2215,7 +2215,6 @@ pub enum ValidationError {
     #[error(transparent)]
     Ui(#[from] UiValidationError),
 }
-
 
 #[cfg(test)]
 pub(crate) fn test_local_timeout() -> Duration {
