@@ -261,8 +261,8 @@ pub struct Session {
 
 impl Session {
     /// Create a session using the data directory resolved from the user's
-    /// Atuin configuration (`ATUIN_DATA_DIR`, XDG, or `data_dir` in
-    /// config.toml), exactly like the official CLI.
+    /// Atuin configuration (`ATUIN_DATA_DIR`, `ATUIN_HOME`, XDG, or `data_dir`
+    /// in config.toml), exactly like the official CLI.
     pub fn new() -> Result<Self> {
         Self::new_with_datadir(None)
     }
@@ -270,8 +270,9 @@ impl Session {
     /// Create a session.
     ///
     /// `Some(data_dir)` uses `data_dir` as the Atuin data directory.
-    /// `None` follows the fully-resolved settings (`ATUIN_DATA_DIR`, XDG, or
-    /// `data_dir` in config.toml) instead of second-guessing the config layer.
+    /// `None` follows the fully-resolved settings (`ATUIN_DATA_DIR`,
+    /// `ATUIN_HOME`, XDG, or `data_dir` in config.toml) instead of
+    /// second-guessing the config layer.
     ///
     /// Prefer [`Session::new`]; the explicit data directory exists for tests
     /// that need to bypass the settings layer.
@@ -293,18 +294,29 @@ impl Session {
 
         // Settings::new() (not builder().try_deserialize()) also registers the
         // lazy meta-store config needed by Settings::host_id() below.
-        let settings = Arc::new(Settings::new()?);
+        let mut settings = Settings::new()?;
 
-        let (db_path, record_store_path, key_path) = match data_dir {
-            Some(data_dir) => {
-                (data_dir.join("history.db"), data_dir.join("records.db"), data_dir.join("key"))
-            }
-            None => (
-                settings.db_path.clone(),
-                settings.record_store_path.clone(),
-                settings.key_path.clone(),
-            ),
-        };
+        // An explicit data directory pins *every* path the session uses.
+        // Atuin 18.24 moved `meta.db` (and the capture/threads stores) under
+        // `Settings::data_dir`, so overriding only history.db/records.db/key
+        // would leave the meta store pointed at the user's real Atuin home:
+        // the stores would straddle two directories, and a test session would
+        // write into the real home. `Settings::new()` still resolves (and may
+        // create) the configured directories, exactly like the CLI.
+        if let Some(data_dir) = data_dir {
+            settings.data_dir = data_dir.to_path_buf();
+            settings.db_path = data_dir.join("history.db");
+            settings.record_store_path = data_dir.join("records.db");
+            settings.key_path = data_dir.join("key");
+            settings.meta.db_path = data_dir.join("meta.db").to_string_lossy().into_owned();
+        }
+
+        let settings = Arc::new(settings);
+        let (db_path, record_store_path, key_path) = (
+            settings.db_path.clone(),
+            settings.record_store_path.clone(),
+            settings.key_path.clone(),
+        );
 
         let (history_db, history_store, session_id) = runtime.block_on(async {
             let timeout = Duration::try_from_secs_f64(settings.local_timeout.as_secs_f64())?;
