@@ -1031,7 +1031,7 @@ impl Default for Ui {
 
 #[allow(deprecated)]
 #[serde_as]
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Settings {
     pub data_dir: PathBuf,
     pub dialect: Dialect,
@@ -2040,7 +2040,6 @@ pub enum ValidationError {
     #[error("failed to expand `data_dir`: {0}")]
     DataDir(shellexpand::LookupError<std::env::VarError>),
 }
-
 
 #[cfg(test)]
 pub(crate) fn test_local_timeout() -> Duration {

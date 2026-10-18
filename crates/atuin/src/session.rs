@@ -316,7 +316,7 @@ impl Session {
             let encryption_key = paseto_v4::Key::try_load_or_generate(&key_path)?;
 
             let history_store =
-                HistoryStore::new(record_store, Settings::host_id().await?, encryption_key);
+                HistoryStore::new(record_store, settings.host_id().await?, encryption_key);
 
             let session_id = atuin_common::utils::uuid_v7().as_simple().to_string();
 
@@ -481,6 +481,8 @@ impl Session {
             settings.keymap_mode_shell = keymap_mode;
         }
 
+        let settings = Arc::new(settings);
+
         match options.mode {
             SearchMode::NonInteractive => self.search_non_interactive(&settings, options),
             SearchMode::Interactive => self.search_interactive_tui(&settings, options.query),
@@ -490,7 +492,7 @@ impl Session {
     /// Non-interactive branch of [`Self::search`].
     fn search_non_interactive(
         &self,
-        settings: &Settings,
+        settings: &Arc<Settings>,
         options: SearchOptions,
     ) -> Result<SearchResult> {
         // Destructure first so the non-query fields can be borrowed by
@@ -516,7 +518,7 @@ impl Session {
             let authors = OrFilter::from_list(authors).unwrap_or_default();
             let shells = OrFilter::from_list(shells).unwrap_or_default();
 
-            let context = query_context().await?;
+            let context = query_context(settings).await?;
             let opt_filter = OptFilters {
                 exit: &exit,
                 exclude_exit: &exclude_exit,
@@ -531,6 +533,8 @@ impl Session {
                 include_duplicates,
                 authors: authors.as_slice_filter(),
                 shells: shells.as_slice_filter(),
+                timezone: settings.timezone,
+                dialect: settings.dialect,
             };
 
             let query = [query];
@@ -548,7 +552,11 @@ impl Session {
     }
 
     /// Interactive branch of [`Self::search`].
-    fn search_interactive_tui(&self, settings: &Settings, query: String) -> Result<SearchResult> {
+    fn search_interactive_tui(
+        &self,
+        settings: &Arc<Settings>,
+        query: String,
+    ) -> Result<SearchResult> {
         self.stats.interactive_search_calls.fetch_add(1, Ordering::Relaxed);
 
         // Drop any bytes left over from a previous TUI run (the tail of a
@@ -560,7 +568,7 @@ impl Session {
         let db = self.history_db.clone();
         let history_store = self.history_store.clone();
         let result = self.rt().block_on(async move {
-            let mut theme_manager = ThemeManager::new(settings.theme.debug, None);
+            let mut theme_manager = ThemeManager::from_settings(&settings.theme);
             let theme =
                 theme_manager.load_theme(settings.theme.name.as_str(), settings.theme.max_depth);
             interactive::history(&[query], settings, db, &history_store, theme).await
