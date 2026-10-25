@@ -28,9 +28,12 @@ use atuin_client::database::{OptFilters, Sqlite, query_context};
 use atuin_client::history::store::HistoryStore;
 use atuin_client::history::{AuthorKind, AuthorPattern, History, HistoryId};
 use atuin_client::record::sqlite_store::SqliteStore;
-use atuin_client::settings::{FilterMode, KeymapMode, RequestedSearchMode, Settings};
+use atuin_client::settings::{
+    DbLocation, FilterMode, KeymapMode, RequestedSearchMode, Settings,
+};
 use atuin_common::encryption::paseto_v4;
 use atuin_common::filter::OrFilter;
+use atuin_common::path::AbsPathBuf;
 use eyre::{Result, eyre};
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
@@ -304,11 +307,15 @@ impl Session {
         // write into the real home. `Settings::new()` still resolves (and may
         // create) the configured directories, exactly like the CLI.
         if let Some(data_dir) = data_dir {
-            settings.data_dir = data_dir.to_path_buf();
-            settings.db_path = data_dir.join("history.db");
-            settings.record_store_path = data_dir.join("records.db");
-            settings.key_path = data_dir.join("key");
-            settings.meta.db_path = data_dir.join("meta.db").to_string_lossy().into_owned();
+            // v18.24.2 wraps these paths: `AbsPathBuf` for the directory and
+            // the key, `DbLocation` for the SQLite stores. An explicit data
+            // dir must be absolute, like the settings layer requires.
+            let dir = AbsPathBuf::new(data_dir.to_path_buf())?;
+            settings.data_dir = dir.clone();
+            settings.db_path = DbLocation::File(dir.resolve("history.db")?);
+            settings.record_store_path = DbLocation::File(dir.resolve("records.db")?);
+            settings.key_path = dir.resolve("key")?;
+            settings.meta.db_path = DbLocation::File(dir.resolve("meta.db")?);
         }
 
         let settings = Arc::new(settings);

@@ -409,7 +409,7 @@ fn make_starting_history_with_cwd(
     author: Option<&str>,
     author_kind: Option<AuthorKind>,
     intent: Option<&str>,
-    cwd: &str,
+    cwd: &std::path::Path,
 ) -> Option<History> {
     // It's better for atuin to silently fail here and attempt to
     // store whatever is ran, than to throw an error to the terminal
@@ -468,9 +468,14 @@ pub(crate) async fn handle_start_with_cwd(
     author_kind: Option<AuthorKind>,
     intent: Option<&str>,
 ) -> Result<Option<HistoryId>> {
-    let Some(h) =
-        make_starting_history_with_cwd(settings, command, author, author_kind, intent, cwd)
-    else {
+    let Some(h) = make_starting_history_with_cwd(
+        settings,
+        command,
+        author,
+        author_kind,
+        intent,
+        std::path::Path::new(cwd),
+    ) else {
         return Ok(None);
     };
 
