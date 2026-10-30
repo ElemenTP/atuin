@@ -587,10 +587,16 @@ impl Session {
         let db = self.history_db.clone();
         let history_store = self.history_store.clone();
         let result = self.rt().block_on(async move {
+            // The TUI shows user-facing messages (delete errors, warnings, ...)
+            // in its status line; v18.24.4 routes them through a `Held` sink
+            // instead of stderr, so push one for the TUI's lifetime.
+            let held = atuin_common::userio::log::Held::default();
+            let _sink = atuin_common::userio::log::SINK.push(held.clone());
+
             let mut theme_manager = ThemeManager::from_settings(&settings.theme);
             let theme =
                 theme_manager.load_theme(settings.theme.name.as_str(), settings.theme.max_depth);
-            interactive::history(&[query], settings, db, &history_store, theme).await
+            interactive::history(&[query], settings, db, &history_store, theme, &held).await
         });
 
         // Release the terminal handle as soon as the TUI is done rather than
