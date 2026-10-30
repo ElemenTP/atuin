@@ -13,8 +13,7 @@ mod i18n;
 pub(crate) mod logs;
 #[cfg(feature = "client")]
 pub(crate) mod shell;
-#[cfg(feature = "sync")]
-mod print_error;
+mod error;
 #[cfg(feature = "sync")]
 mod sync;
 
