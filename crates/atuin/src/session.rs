@@ -648,6 +648,24 @@ impl Session {
     pub fn session_id_str(&self) -> &str {
         &self.session_id
     }
+
+    /// Whether `atuin init` would bind Ctrl+R to the search widget for this
+    /// configuration.
+    ///
+    /// Mirrors `init::Cmd::to_options`: the `bind_ctrl_r` setting decides.
+    /// `ATUIN_NOBIND` and `--disable-ctrl-r` are the caller's business, and
+    /// this only answers what the configuration asks for.
+    #[must_use]
+    pub fn bind_ctrl_r(&self) -> bool {
+        self.settings.bind_ctrl_r
+    }
+
+    /// Whether `atuin init` would bind the Up arrow to the search widget for
+    /// this configuration (`bind_up_arrow`).
+    #[must_use]
+    pub fn bind_up_arrow(&self) -> bool {
+        self.settings.bind_up_arrow
+    }
 }
 
 impl Drop for Session {
